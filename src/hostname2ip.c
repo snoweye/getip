@@ -41,6 +41,8 @@
 #include <netinet/in.h>
 #elif OS_WINDOWS
 #include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
 #endif
 
 
@@ -60,12 +62,12 @@ static SEXP hostname2ip(SEXP s_)
   SEXP ret;
   const int len = LENGTH(s_);
   struct addrinfo hints, *res, *p;
-  char ipstr[INET_ADDRSTRLEN];
+  char ipstr[INET_ADDRSTRLEN+1];
   
   newRlist(ret, len);
   
   
-  memset(&hints, 0, sizeof hints);
+  memset(&hints, 0, sizeof(struct addrinfo));
   hints.ai_family = AF_UNSPEC; // AF_INET or AF_INET6 to force version
   hints.ai_socktype = SOCK_STREAM;
   
@@ -77,9 +79,13 @@ static SEXP hostname2ip(SEXP s_)
     
     int status = getaddrinfo(s, NULL, &hints, &res);
     if (status != 0)
-      error("host %s returned %s in getaddrinfo\n", s, gai_strerror(status));
+    {
+      R_END;
+      error("getaddrinfo() failed with error \"%s\"\n      host:  %s\n      index: %i\n", gai_strerror(status), s, i);
+    }
     
     
+    // count number of addrs, then set return vector
     for (p=res; p != NULL; p=p->ai_next)
     {
       if (IS_IPV4(p))
@@ -103,7 +109,6 @@ static SEXP hostname2ip(SEXP s_)
         struct sockaddr_in *ipv4 = (struct sockaddr_in *)p->ai_addr;
         void *addr = &(ipv4->sin_addr);
         
-        // convert the IP to a string and print it:
         inet_ntop(p->ai_family, addr, ipstr, sizeof ipstr);
         SET_STRING_ELT(ipvec, num_addrs, mkChar(ipstr));
         num_addrs++;
@@ -130,8 +135,77 @@ static SEXP hostname2ip(SEXP s_)
 
 static SEXP hostname2ip(SEXP s_)
 {
-  error("TODO");
-  return R_NilValue;
+  WSADATA wsad;
+  struct hostent *host;
+  struct in_addr addr;
+  SEXP ret;
+  const int len = LENGTH(s_);
+  
+  newRlist(ret, len);
+  
+  for (int i=0; i<len; i++)
+  {
+    SEXP ipvec;
+    const char *const s = STR(s_, i);
+    int num_addrs = 0;
+    
+    memset(&addr, 0, sizeof(struct in_addr));
+    
+    // start winsock
+    int wserr = WSAStartup(MAKEWORD(2, 2), &wsad);
+    if (wserr != 0)
+    {
+      R_END;
+      error("WSAStartup() failed with error: %d\n", wserr);
+    }
+    
+    host = gethostbyname(s);
+    if (host == NULL)
+    {
+      DWORD errnum = WSAGetLastError();
+      
+      if (errnum != 0)
+      {
+        R_END;
+        
+        if (errnum == WSAHOST_NOT_FOUND || errnum == WSANO_DATA)
+          error("gethostbyname() failed with error \"Name or service not known\"\n      host:  %s\n      index: %i\n", s, i);
+        else
+          error("gethostbyname() failed with error: %ld\n", errnum);
+      }
+    }
+    
+    
+    // count number of addrs, then set return vector
+    if (host->h_addrtype == AF_INET)
+    {
+      while (host->h_addr_list[num_addrs])
+        num_addrs++;
+    }
+    
+    if (num_addrs == 0)
+    {
+      SET_VECTOR_ELT(ret, i, Rf_ScalarString(NA_STRING));
+      continue;
+    }
+    
+    newRvec(ipvec, num_addrs, "str");
+    num_addrs = 0;
+    
+    while (host->h_addr_list[num_addrs])
+    {
+      // have to manually set the field length for some reason ???
+      addr.s_addr = *(u_long*) host->h_addr_list[num_addrs];
+      SET_STRING_ELT(ipvec, num_addrs, mkChar(inet_ntoa(addr)));
+      num_addrs++;
+    }
+    
+    SET_VECTOR_ELT(ret, i, ipvec);
+  }
+  
+  
+  R_END;
+  return ret;
 }
 
 
